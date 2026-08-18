@@ -1,0 +1,11 @@
+{
+  "name": "opencode-kiconnect-status",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpenCode widget: the KI:connect gateway's verified upstream model and hourly quota",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test 'test/**/*.test.mjs'"
+  }
+}
