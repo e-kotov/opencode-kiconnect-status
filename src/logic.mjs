@@ -150,9 +150,9 @@ function joinSegments(segments) {
   return segments.filter((segment) => typeof segment === "string" && segment.length > 0).join(" · ")
 }
 
-/** The four candidate renderings, widest first. */
+/** The five candidate renderings, widest first. */
 export function tiers(status, options = {}) {
-  if (!meaningfulStatus(status)) return ["", "", "", ""]
+  if (!meaningfulStatus(status)) return ["", "", "", "", ""]
 
   // Rule 1: no verified model means the literal `KI:connect`, never the alias.
   const name = status.actualModel ? `KI: ${status.actualModel}` : "KI:connect"
@@ -165,17 +165,22 @@ export function tiers(status, options = {}) {
 
   const speed = Number(options.tokensPerSecond) > 0 ? `${Math.round(options.tokensPerSecond)} T/s` : undefined
 
+  // The narrowest useful thing this widget knows: requests left this hour. At
+  // five columns it still fits a row where `984/1000/h` does not.
+  const bare = status.remaining !== undefined ? `${status.remaining}/h` : quota
+
   return [
     joinSegments([name, quota, speed]),
     joinSegments([name, quota]),
     joinSegments([short, quota]),
     joinSegments([quota]),
+    joinSegments([bare]),
   ]
 }
 
 export function renderKiStatus(status, options = {}) {
   const budget = options.budget ?? widgetBudget(options.width ?? 120, options.widgets ?? 2)
-  return selectTier(tiers(status, options), budget)
+  return selectTier(tiers(status, options), budget, { floor: normaliseNarrow(options.narrow) === "always" })
 }
 
 /**
@@ -292,9 +297,31 @@ export function resolveWidth(measuredWidth, columns, fallback = 120) {
   return fallback
 }
 
-export function selectTier(candidates, budget) {
+/**
+ * What a widget does when even its narrowest tier will not fit.
+ *
+ *   "always" — print the narrowest tier anyway. Below ~70 columns the host's
+ *              own left segment is already wrapping (`Buil/d auto · GPT5-mini-
+ *              Mitarbeitende KI:connect (/Responses API)`), so a strict budget
+ *              buys a tidy row that does not exist and costs the numbers.
+ *   "hide"   — print nothing, keeping the row as short as the host allows.
+ */
+export const NARROW_MODES = ["always", "hide"]
+export const DEFAULT_NARROW = "always"
+
+export function normaliseNarrow(value, fallback = DEFAULT_NARROW) {
+  if (NARROW_MODES.includes(value)) return value
+  return NARROW_MODES.includes(fallback) ? fallback : DEFAULT_NARROW
+}
+
+export function selectTier(candidates, budget, options = {}) {
   for (const candidate of candidates) {
     if (candidate && displayWidth(candidate) <= budget) return candidate
+  }
+  if (!options.floor) return ""
+  // Nothing fits. The narrowest non-empty candidate beats an empty strip.
+  for (let index = candidates.length - 1; index >= 0; index -= 1) {
+    if (candidates[index]) return candidates[index]
   }
   return ""
 }

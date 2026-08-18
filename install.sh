@@ -27,20 +27,33 @@ DEST="${HOME}/.config/opencode"
 
 usage() {
   cat <<'USAGE'
-usage: install.sh [--dest DIR]
+usage: install.sh [--dest DIR] [--narrow MODE]
 
-  --dest DIR   OpenCode config directory (default: ~/.config/opencode)
+  --dest DIR     OpenCode config directory (default: ~/.config/opencode)
+  --narrow MODE  What the widget does when the prompt row is too narrow for
+                 even its shortest form: "always" (print it anyway, the
+                 default) or "hide". Written into tui.json as the plugin's
+                 options; the in-app command overrides it per machine.
 USAGE
 }
+
+NARROW=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --dest) DEST="${2:?--dest needs a directory}"; shift 2 ;;
     --dest=*) DEST="${1#--dest=}"; shift ;;
+    --narrow) NARROW="${2:?--narrow needs a mode}"; shift 2 ;;
+    --narrow=*) NARROW="${1#--narrow=}"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) printf 'install.sh: unknown argument: %s\n' "$1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+case "$NARROW" in
+  ""|always|hide) ;;
+  *) printf 'install.sh: --narrow must be "always" or "hide", got: %s\n' "$NARROW" >&2; exit 2 ;;
+esac
 
 LIB_NAME="kiconnect-status-logic.mjs"
 WIDGET="./plugins/kiconnect-status-tui.tsx"
@@ -63,10 +76,10 @@ done
 
 # Register the widget in tui.json, extending the plugin array without
 # disturbing any other TUI setting. The server half needs no entry.
-python3 - "$DEST/tui.json" "$WIDGET" <<'PYEOF'
+python3 - "$DEST/tui.json" "$WIDGET" "$NARROW" <<'PYEOF'
 import json, pathlib, sys
 
-path, entry = pathlib.Path(sys.argv[1]), sys.argv[2]
+path, entry, narrow = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
 config = json.loads(path.read_text()) if path.exists() else {}
 if not isinstance(config, dict):
     raise SystemExit("install.sh: %s is not a JSON object" % path)
@@ -75,8 +88,29 @@ plugins = config.get("plugin", [])
 if not isinstance(plugins, list):
     raise SystemExit('install.sh: %s has a non-list "plugin"' % path)
 
-if entry not in plugins:
-    plugins.append(entry)
+
+def spec_of(item):
+    """An entry is either "<spec>" or ["<spec>", {options}] (ConfigPluginV1.Spec)."""
+    if isinstance(item, list) and item:
+        return item[0]
+    return item
+
+
+# Match on the spec, so re-running with a different --narrow rewrites our own
+# entry instead of appending a second registration for the same widget.
+index = next((i for i, item in enumerate(plugins) if spec_of(item) == entry), None)
+if narrow:
+    replacement = [entry, {"narrow": narrow}]
+elif index is not None and isinstance(plugins[index], list):
+    replacement = plugins[index]  # no flag given: leave existing options alone
+else:
+    replacement = entry
+
+if index is None:
+    plugins.append(replacement)
+else:
+    plugins[index] = replacement
+
 config.setdefault("$schema", "https://opencode.ai/tui.json")
 config["plugin"] = plugins
 

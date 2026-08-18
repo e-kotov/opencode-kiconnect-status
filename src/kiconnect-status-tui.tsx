@@ -19,15 +19,59 @@
 // `usesSidebar` for the rule and its one known limitation.
 
 import { useTerminalDimensions } from "@opentui/solid"
-import { For, Show } from "solid-js"
+import { createSignal, For, Show } from "solid-js"
 import type { TuiPluginApi, TuiPluginModule, TuiSlotProps } from "@opencode-ai/plugin/tui"
-import { isActive, renderKiStatus, resolveWidth, restoreStatus, sidebarLines, tokensPerSecond, usesSidebar } from "./logic.mjs"
+import { isActive, normaliseNarrow, renderKiStatus, resolveWidth, restoreStatus, sidebarLines, tokensPerSecond, usesSidebar } from "./logic.mjs"
 
 type KiconnectStatusProps = Pick<TuiSlotProps<"session_prompt_right">, "session_id">
 
+/** Where the runtime override lives, so it survives a restart. */
+const NARROW_KEY = "kiconnect-status.narrow"
+
 const plugin: TuiPluginModule = {
   id: "kiconnect-status-tui",
-  tui: async (api: TuiPluginApi) => {
+  tui: async (api: TuiPluginApi, options) => {
+    // Three layers, narrowest scope first: a value set at runtime by the
+    // command below wins, else the `tui.json` plugin options written by
+    // install.sh, else the built-in default.
+    const configured = normaliseNarrow((options as { narrow?: unknown } | undefined)?.narrow)
+    const stored = () => {
+      try {
+        return api.kv.get(NARROW_KEY)
+      } catch {
+        return undefined
+      }
+    }
+    const [narrow, setNarrow] = createSignal(normaliseNarrow(stored(), configured))
+
+    try {
+      api.keymap.registerLayer({
+        commands: [
+          {
+            name: "kiconnect_status_narrow",
+            title: "KI:connect widget: toggle narrow-terminal behaviour",
+            category: "Plugin",
+            namespace: "palette",
+            slashName: "ki-status-narrow",
+            run() {
+              const next = narrow() === "always" ? "hide" : "always"
+              setNarrow(next)
+              try {
+                api.kv.set(NARROW_KEY, next)
+              } catch {
+                // Not persisting is survivable; not redrawing is not.
+              }
+              api.ui.toast({
+                message: `KI:connect widget on narrow terminals: ${next === "always" ? "always show" : "hide"}`,
+              })
+            },
+          },
+        ],
+      })
+    } catch {
+      // A command API that moved must not cost us the widget itself.
+    }
+
     // `api.renderer` is a plain CliRenderer, so reading `.width` off it is not
     // reactive and the widget would keep whatever width it saw at first render
     // — it would never move between slots on a resize. `useTerminalDimensions`
@@ -65,6 +109,7 @@ const plugin: TuiPluginModule = {
           if (!current) return ""
           return renderKiStatus(current.status, {
             width: width(),
+            narrow: narrow(),
             tokensPerSecond: current.tokensPerSecond,
           })
         } catch {

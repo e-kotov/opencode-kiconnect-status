@@ -3,13 +3,16 @@ import test from "node:test"
 
 import {
   activeProviderID,
+  DEFAULT_NARROW,
   displayWidth,
   formatSeconds,
   isActive,
   meaningfulStatus,
   mergeStatus,
+  normaliseNarrow,
   renderKiStatus,
   restoreStatus,
+  selectTier,
   shortenModel,
   sidebarLines,
   statusFromHeaders,
@@ -120,6 +123,9 @@ test("renders every tier", () => {
     "KI: gpt-5.6-terra-mitarbeitende · 87/100/h",
     "KI: terra · 87/100/h",
     "87/100/h",
+    // Five columns of the only thing that still matters when there is no room:
+    // requests left this hour.
+    "87/h",
   ])
 })
 
@@ -131,7 +137,13 @@ test("never falls back to the configured alias for the model name", () => {
     "x-ratelimit-limit-hour": "100",
     "x-ratelimit-remaining-hour": "87",
   }, 0)
-  assert.deepEqual(tiers(status), ["KI:connect · 87/100/h", "KI:connect · 87/100/h", "KI:connect · 87/100/h", "87/100/h"])
+  assert.deepEqual(tiers(status), [
+    "KI:connect · 87/100/h",
+    "KI:connect · 87/100/h",
+    "KI:connect · 87/100/h",
+    "87/100/h",
+    "87/h",
+  ])
   assert.doesNotMatch(tiers(status).join(" "), /Mitarbeitende/i)
 })
 
@@ -147,6 +159,7 @@ test("shows a missing half of the quota pair as a question mark", () => {
     "x-ratelimit-remaining-hour": "87",
   }, 0)
   assert.equal(tiers(status)[3], "87/?/h")
+  assert.equal(tiers(status)[4], "87/h", "the narrowest tier needs no limit at all")
 })
 
 test("steps down a tier as the terminal narrows", () => {
@@ -157,7 +170,39 @@ test("steps down a tier as the terminal narrows", () => {
   assert.equal(at(120), "KI: terra · 87/100/h")
   assert.equal(at(110), "87/100/h")
   assert.equal(at(90), "87/100/h", "9 columns still fits the bare quota")
-  assert.equal(at(80), "")
+  assert.equal(at(84), "87/h", "6 columns still fits the hourly remainder")
+  assert.equal(at(80), "87/h", "and so does 4, exactly")
+  // Past the last tier the two narrow modes part company.
+  assert.equal(renderKiStatus(status, { width: 76, narrow: "hide" }), "")
+  assert.equal(at(76), "87/h", "the default keeps the numbers")
+})
+
+test("keeps the narrowest tier when nothing fits, unless told to hide", () => {
+  // Below ~70 columns the host's own left segment is already wrapping, so a
+  // strict budget buys a tidy row that does not exist and costs the numbers.
+  const status = statusFromHeaders(GATEWAY_HEADERS, 0)
+  for (const width of [76, 65, 40, 4]) {
+    assert.equal(renderKiStatus(status, { width }), "87/h", `${width} columns, default`)
+    assert.equal(renderKiStatus(status, { width, narrow: "hide" }), "", `${width} columns, hide`)
+  }
+  // Nothing known still means nothing shown, in either mode.
+  assert.equal(renderKiStatus(statusFromHeaders({}, 0), { width: 40 }), "")
+})
+
+test("normalises a narrow mode, falling back rather than trusting input", () => {
+  assert.equal(DEFAULT_NARROW, "always")
+  assert.equal(normaliseNarrow("hide"), "hide")
+  assert.equal(normaliseNarrow(undefined), "always")
+  assert.equal(normaliseNarrow("nonsense"), "always")
+  // A bad value from tui.json falls through to the layer beneath it.
+  assert.equal(normaliseNarrow(undefined, "hide"), "hide")
+  assert.equal(normaliseNarrow("nonsense", "hide"), "hide")
+})
+
+test("floors only when asked, so selectTier stays honest by default", () => {
+  assert.equal(selectTier(["wide enough", "short"], 3), "")
+  assert.equal(selectTier(["wide enough", "short"], 3, { floor: true }), "short")
+  assert.equal(selectTier(["", ""], 0, { floor: true }), "", "nothing to fall back to")
 })
 
 test("shortens a route name to its distinctive part", () => {
@@ -179,10 +224,12 @@ test("reserves the columns the prompt row actually spends", () => {
   assert.equal(widgetBudget(120, 3), 16)
   assert.equal(widgetBudget(72), 0)
   assert.equal(widgetBudget("nonsense"), 0)
-  // 80 columns leaves 4 per widget — short of the 8 the narrowest tier needs,
-  // so the widget disappears rather than wrapping the row.
+  // 80 columns leaves 4 per widget — exactly what `87/h` costs, so the
+  // narrowest tier survives even under "hide". 76 is the first width it does
+  // not, though a three-digit remainder (`984/h`) runs out one step earlier.
   assert.equal(widgetBudget(80, 2), 4)
-  assert.equal(renderKiStatus(statusFromHeaders(GATEWAY_HEADERS, 0), { width: 80 }), "")
+  assert.equal(renderKiStatus(statusFromHeaders(GATEWAY_HEADERS, 0), { width: 80, narrow: "hide" }), "87/h")
+  assert.equal(renderKiStatus(statusFromHeaders(GATEWAY_HEADERS, 0), { width: 76, narrow: "hide" }), "")
 })
 
 test("draws only while KI:connect is the provider that answered last", () => {

@@ -98,13 +98,17 @@ not visible; toggling it back restores it.
 tiers are rendered and the widest that fits the budget wins:
 
 ```
-T3  KI: gpt-5.6-terra-mitarbeitende · 87/100/h · 82 T/s
-T2  KI: gpt-5.6-terra-mitarbeitende · 87/100/h
-T1  KI: terra · 87/100/h
-T0  87/100/h
+T4  KI: gpt-5.6-terra-mitarbeitende · 87/100/h · 82 T/s
+T3  KI: gpt-5.6-terra-mitarbeitende · 87/100/h
+T2  KI: terra · 87/100/h
+T1  87/100/h
+T0  87/h
 ```
 
-T1 reduces the route name to its distinctive part, dropping generic (`gpt`,
+T0 drops the limit and keeps only what is left this hour — four columns, where
+`87/100/h` needs ten.
+
+T2 reduces the route name to its distinctive part, dropping generic (`gpt`,
 `5.6`) and audience (`mitarbeitende`) components. If every part is generic the
 first one wins, so `GPT5-Mitarbeitende` shortens to `GPT5` rather than to
 `Mitarbeitende`.
@@ -121,7 +125,31 @@ Build auto · GPT5-mini-Mitarbeitende KI:connect (Responses API) · high
 — about 70 columns of a 110-column terminal. At 110 each widget gets 19, which
 is exactly what T0 was built for. As a backstop the widget renders inside
 `<box flexShrink={1} overflow="hidden">` with `truncate`, so a mis-measured
-width clips instead of reflowing. If nothing fits, it renders nothing.
+width clips instead of reflowing.
+
+If nothing fits, what happens is configurable — because below ~70 columns the
+host's own left segment is already wrapping, so a strict budget buys a tidy row
+that does not exist and costs you the numbers:
+
+| Mode | Below T0 |
+|---|---|
+| `always` (default) | print `87/h` anyway and let the row wrap |
+| `hide` | print nothing |
+
+Three layers decide it, narrowest scope first:
+
+```sh
+./install.sh --narrow hide          # writes it into tui.json as plugin options
+```
+
+```jsonc
+// ~/.config/opencode/tui.json — what --narrow produces
+"plugin": [["./plugins/kiconnect-status-tui.tsx", { "narrow": "hide" }]]
+```
+
+and at runtime `/ki-status-narrow` (also in the `ctrl+p` palette) toggles it,
+persists the choice through `api.kv`, and redraws immediately — no reinstall,
+no restart. The runtime value wins over `tui.json`, which wins over the default.
 
 Registered at `order: 130`, last in the strip. The same order governs the
 sidebar stack.
