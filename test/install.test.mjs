@@ -142,3 +142,25 @@ test("install.sh rejects a placement it does not know", () => {
     assert.throws(() => tui(dest), /ENOENT/)
   })
 })
+
+test("recognises its own entry after OpenCode rewrites it to an absolute path", () => {
+  withDest("absolute", (dest) => {
+    install(dest)
+    // What OpenCode does to the config when it loads it: the relative spec this
+    // script wrote comes back absolute. Matching raw strings would miss it and
+    // append a second registration, so the widget would render twice.
+    const rewritten = { $schema: "https://opencode.ai/tui.json", plugin: [join(dest, "plugins/kiconnect-status-tui.tsx")] }
+    writeFileSync(join(dest, "tui.json"), JSON.stringify(rewritten, null, 2) + "\n")
+
+    install(dest)
+    const plugins = tui(dest).plugin
+    assert.equal(plugins.length, 1, "an absolute entry is the same registration, not a new one")
+    assert.match(String(plugins[0]), /kiconnect-status-tui.tsx$/)
+
+    // And options still land on it rather than on a duplicate.
+    install(dest, "--placement", "prompt")
+    const withOptions = tui(dest).plugin
+    assert.equal(withOptions.length, 1)
+    assert.deepEqual(withOptions[0][1], { placement: "prompt" })
+  })
+})

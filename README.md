@@ -219,28 +219,11 @@ by `formatSeconds`, but is not rendered: the strip has room for one line.
 ## Install
 
 ```sh
-./install.sh                  # ~/.config/opencode
-./install.sh --dest /some/dir
+git clone https://github.com/e-kotov/opencode-kiconnect-status.git && cd opencode-kiconnect-status && ./install.sh
 ```
 
-It **copies**:
-
-```
-<dest>/lib/kiconnect-status-logic.mjs      helper module
-<dest>/plugins/kiconnect-status-server.js  server entrypoint
-<dest>/plugins/kiconnect-status-tui.tsx    TUI entrypoint
-```
-
-The helper must not live in `plugins/`: OpenCode auto-discovers *every immediate
-file* there and loads it as a plugin, so a bare module fails with `Plugin export
-is not a function`. `install.sh` therefore rewrites each entrypoint's
-`./logic.mjs` import to `../lib/kiconnect-status-logic.mjs`, and fails loudly if
-that rewrite does not take.
-
-Copies, not symlinks, because the same checkout is `scp`'d to a remote host and
-installed there. Editing the repo means re-running `install.sh`.
-
-Restart OpenCode afterwards.
+Restart OpenCode. `./install.sh --dest DIR` targets another config directory;
+`--placement` and `--narrow` set the defaults (see below). Re-running is safe.
 
 ## Test
 

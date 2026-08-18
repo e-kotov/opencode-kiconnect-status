@@ -90,7 +90,7 @@ done
 # Register the widget in tui.json, extending the plugin array without
 # disturbing any other TUI setting. The server half needs no entry.
 python3 - "$DEST/tui.json" "$WIDGET" "$NARROW" "$PLACEMENT" <<'PYEOF'
-import json, pathlib, sys
+import json, os, pathlib, sys
 
 path, entry = pathlib.Path(sys.argv[1]), sys.argv[2]
 flags = {"narrow": sys.argv[3], "placement": sys.argv[4]}
@@ -110,9 +110,26 @@ def spec_of(item):
     return item
 
 
+def same_widget(item, entry):
+    """Whether an existing entry registers the widget `entry` names.
+
+    Compared on the file name, not the spec string. OpenCode rewrites a
+    relative spec to an absolute path when it loads the config, so the entry
+    this script wrote as `./plugins/x.tsx` comes back as
+    `/home/you/.config/opencode/plugins/x.tsx`. Matching the raw strings then
+    finds nothing, appends a second registration for the same file, and the
+    widget renders twice — measured on GWDG, where all three had been
+    rewritten. The file name is what actually identifies the widget.
+    """
+    spec = spec_of(item)
+    if not isinstance(spec, str):
+        return False
+    return os.path.basename(spec) == os.path.basename(entry)
+
+
 # Match on the spec, so re-running with a different --narrow rewrites our own
 # entry instead of appending a second registration for the same widget.
-index = next((i for i, item in enumerate(plugins) if spec_of(item) == entry), None)
+index = next((i for i, item in enumerate(plugins) if same_widget(item, entry)), None)
 
 # Start from whatever options are already configured, so `--narrow` does not
 # silently drop a `--placement` set by an earlier run, and a flag left off
