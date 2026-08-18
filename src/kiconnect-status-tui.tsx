@@ -21,12 +21,13 @@
 import { useTerminalDimensions } from "@opentui/solid"
 import { createSignal, For, Show } from "solid-js"
 import type { TuiPluginApi, TuiPluginModule, TuiSlotProps } from "@opencode-ai/plugin/tui"
-import { isActive, normaliseNarrow, renderKiStatus, resolveWidth, restoreStatus, sidebarLines, tokensPerSecond, usesSidebar } from "./logic.mjs"
+import { isActive, normaliseNarrow, normalisePlacement, renderKiStatus, resolveWidth, restoreStatus, sidebarLines, tokensPerSecond, usesSidebar } from "./logic.mjs"
 
 type KiconnectStatusProps = Pick<TuiSlotProps<"session_prompt_right">, "session_id">
 
-/** Where the runtime override lives, so it survives a restart. */
+/** Where the runtime overrides live, so they survive a restart. */
 const NARROW_KEY = "kiconnect-status.narrow"
+const PLACEMENT_KEY = "kiconnect-status.placement"
 
 const plugin: TuiPluginModule = {
   id: "kiconnect-status-tui",
@@ -34,15 +35,26 @@ const plugin: TuiPluginModule = {
     // Three layers, narrowest scope first: a value set at runtime by the
     // command below wins, else the `tui.json` plugin options written by
     // install.sh, else the built-in default.
-    const configured = normaliseNarrow((options as { narrow?: unknown } | undefined)?.narrow)
-    const stored = () => {
+    const settings = (options ?? {}) as { narrow?: unknown; placement?: unknown }
+    const configured = { narrow: settings.narrow, placement: settings.placement }
+    const stored = (key: string) => {
       try {
-        return api.kv.get(NARROW_KEY)
+        return api.kv.get(key)
       } catch {
         return undefined
       }
     }
-    const [narrow, setNarrow] = createSignal(normaliseNarrow(stored(), configured))
+    const remember = (key: string, value: string) => {
+      try {
+        api.kv.set(key, value)
+      } catch {
+        // Not persisting is survivable; not redrawing is not.
+      }
+    }
+    const [narrow, setNarrow] = createSignal(normaliseNarrow(stored(NARROW_KEY), configured.narrow))
+    const [placement, setPlacement] = createSignal(
+      normalisePlacement(stored(PLACEMENT_KEY), configured.placement),
+    )
 
     try {
       api.keymap.registerLayer({
@@ -56,14 +68,26 @@ const plugin: TuiPluginModule = {
             run() {
               const next = narrow() === "always" ? "hide" : "always"
               setNarrow(next)
-              try {
-                api.kv.set(NARROW_KEY, next)
-              } catch {
-                // Not persisting is survivable; not redrawing is not.
-              }
+              remember(NARROW_KEY, next)
               api.ui.toast({
                 message: `KI:connect widget on narrow terminals: ${next === "always" ? "always show" : "hide"}`,
               })
+            },
+          },
+          {
+            name: "kiconnect_status_placement",
+            title: "KI:connect widget: cycle where it draws",
+            category: "Plugin",
+            namespace: "palette",
+            slashName: "ki-status-placement",
+            run() {
+              // Three modes, so a cycle rather than a toggle, running from the
+              // least opinionated to the most.
+              const order = ["auto", "prompt", "sidebar"]
+              const next = order[(order.indexOf(placement()) + 1) % order.length]
+              setPlacement(next)
+              remember(PLACEMENT_KEY, next)
+              api.ui.toast({ message: `KI:connect widget draws: ${next}` })
             },
           },
         ],
@@ -104,7 +128,7 @@ const plugin: TuiPluginModule = {
       const width = useWidth()
       const text = () => {
         try {
-          if (usesSidebar(width(), api.state.session.get(props.session_id))) return ""
+          if (usesSidebar(width(), api.state.session.get(props.session_id), placement())) return ""
           const current = active(props.session_id)
           if (!current) return ""
           return renderKiStatus(current.status, {
@@ -133,7 +157,7 @@ const plugin: TuiPluginModule = {
       const width = useWidth()
       const lines = () => {
         try {
-          if (!usesSidebar(width(), api.state.session.get(props.session_id))) return []
+          if (!usesSidebar(width(), api.state.session.get(props.session_id), placement())) return []
           const current = active(props.session_id)
           if (!current) return []
           return sidebarLines(current.status, { tokensPerSecond: current.tokensPerSecond }) as string[]

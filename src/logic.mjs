@@ -267,17 +267,41 @@ export function widgetBudget(totalWidth, widgets = 2) {
 export const SIDEBAR_BUDGET = 36
 
 /**
- * Which slot owns the display, mirroring the host's own rule rather than
- * guessing at it (`packages/tui/src/routes/session/index.tsx`): the sidebar is
- * force-hidden in subagent sessions, and otherwise auto-shows above 120
- * columns. Each slot renders nothing when the other owns the display, so the
- * widget never appears twice.
+ * Where the widget draws.
  *
- * Known limitation: a plugin cannot observe the manual sidebar toggle. With the
- * sidebar toggled off on a wide terminal the block is rendered into it and is
- * not visible; toggling it back restores it.
+ *   "auto"    — follow the host: the sidebar when the host shows one, the
+ *               prompt row otherwise. The default.
+ *   "prompt"  — always the prompt row, even on a wide terminal.
+ *   "sidebar" — always the sidebar. Taken literally: the host force-hides the
+ *               sidebar in subagent sessions and below 121 columns unless it is
+ *               toggled open, and in those cases this mode shows nothing rather
+ *               than quietly falling back to the row you asked it to leave
+ *               alone.
  */
-export function usesSidebar(width, session) {
+export const PLACEMENT_MODES = ["auto", "prompt", "sidebar"]
+export const DEFAULT_PLACEMENT = "auto"
+
+export function normalisePlacement(value, fallback = DEFAULT_PLACEMENT) {
+  if (PLACEMENT_MODES.includes(value)) return value
+  return PLACEMENT_MODES.includes(fallback) ? fallback : DEFAULT_PLACEMENT
+}
+
+/**
+ * Which slot owns the display. Under "auto" this mirrors the host's own rule
+ * rather than guessing at it (`packages/tui/src/routes/session/index.tsx`): the
+ * sidebar is force-hidden in subagent sessions, and otherwise auto-shows above
+ * 120 columns. Each slot renders nothing when the other owns the display, so
+ * the widget never appears twice.
+ *
+ * Known limitation: a plugin cannot observe the manual sidebar toggle. Under
+ * "auto", with the sidebar toggled off on a wide terminal, the block is
+ * rendered into it and is not visible; toggling it back restores it. Choosing
+ * "prompt" sidesteps that entirely.
+ */
+export function usesSidebar(width, session, placement = DEFAULT_PLACEMENT) {
+  const mode = normalisePlacement(placement)
+  if (mode === "prompt") return false
+  if (mode === "sidebar") return true
   const total = Number(width)
   if (!Number.isFinite(total)) return false
   return total > 120 && !session?.parentID

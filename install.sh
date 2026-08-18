@@ -32,12 +32,18 @@ usage: install.sh [--dest DIR] [--narrow MODE]
   --dest DIR     OpenCode config directory (default: ~/.config/opencode)
   --narrow MODE  What the widget does when the prompt row is too narrow for
                  even its shortest form: "always" (print it anyway, the
-                 default) or "hide". Written into tui.json as the plugin's
-                 options; the in-app command overrides it per machine.
+                 default) or "hide".
+  --placement M  Where it draws: "auto" (sidebar when the host shows one,
+                 prompt row otherwise -- the default), "prompt" (always under
+                 the chat box) or "sidebar" (only in the sidebar).
+
+Both are written into tui.json as the plugin's options, and both can be changed
+afterwards from the command palette without reinstalling.
 USAGE
 }
 
 NARROW=""
+PLACEMENT=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -45,6 +51,8 @@ while [ $# -gt 0 ]; do
     --dest=*) DEST="${1#--dest=}"; shift ;;
     --narrow) NARROW="${2:?--narrow needs a mode}"; shift 2 ;;
     --narrow=*) NARROW="${1#--narrow=}"; shift ;;
+    --placement) PLACEMENT="${2:?--placement needs a mode}"; shift 2 ;;
+    --placement=*) PLACEMENT="${1#--placement=}"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) printf 'install.sh: unknown argument: %s\n' "$1" >&2; usage >&2; exit 2 ;;
   esac
@@ -53,6 +61,11 @@ done
 case "$NARROW" in
   ""|always|hide) ;;
   *) printf 'install.sh: --narrow must be "always" or "hide", got: %s\n' "$NARROW" >&2; exit 2 ;;
+esac
+
+case "$PLACEMENT" in
+  ""|auto|prompt|sidebar) ;;
+  *) printf 'install.sh: --placement must be "auto", "prompt" or "sidebar", got: %s\n' "$PLACEMENT" >&2; exit 2 ;;
 esac
 
 LIB_NAME="kiconnect-status-logic.mjs"
@@ -76,10 +89,11 @@ done
 
 # Register the widget in tui.json, extending the plugin array without
 # disturbing any other TUI setting. The server half needs no entry.
-python3 - "$DEST/tui.json" "$WIDGET" "$NARROW" <<'PYEOF'
+python3 - "$DEST/tui.json" "$WIDGET" "$NARROW" "$PLACEMENT" <<'PYEOF'
 import json, pathlib, sys
 
-path, entry, narrow = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+path, entry = pathlib.Path(sys.argv[1]), sys.argv[2]
+flags = {"narrow": sys.argv[3], "placement": sys.argv[4]}
 config = json.loads(path.read_text()) if path.exists() else {}
 if not isinstance(config, dict):
     raise SystemExit("install.sh: %s is not a JSON object" % path)
@@ -99,12 +113,15 @@ def spec_of(item):
 # Match on the spec, so re-running with a different --narrow rewrites our own
 # entry instead of appending a second registration for the same widget.
 index = next((i for i, item in enumerate(plugins) if spec_of(item) == entry), None)
-if narrow:
-    replacement = [entry, {"narrow": narrow}]
-elif index is not None and isinstance(plugins[index], list):
-    replacement = plugins[index]  # no flag given: leave existing options alone
-else:
-    replacement = entry
+
+# Start from whatever options are already configured, so `--narrow` does not
+# silently drop a `--placement` set by an earlier run, and a flag left off
+# leaves its option untouched.
+current = plugins[index][1] if index is not None and isinstance(plugins[index], list) and len(plugins[index]) > 1 else {}
+options = dict(current) if isinstance(current, dict) else {}
+options.update({key: value for key, value in flags.items() if value})
+
+replacement = [entry, options] if options else entry
 
 if index is None:
     plugins.append(replacement)

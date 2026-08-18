@@ -117,3 +117,28 @@ test("install.sh rejects a narrow mode it does not know", () => {
     assert.throws(() => tui(dest), /ENOENT/)
   })
 })
+
+test("--placement writes the mode alongside any narrow option", () => {
+  withDest("placement", (dest) => {
+    install(dest, "--placement", "prompt")
+    assert.deepEqual(tui(dest).plugin, [["./plugins/kiconnect-status-tui.tsx", { placement: "prompt" }]])
+
+    // Setting one option must not silently drop the other.
+    install(dest, "--narrow", "hide")
+    assert.deepEqual(tui(dest).plugin, [["./plugins/kiconnect-status-tui.tsx", { placement: "prompt", narrow: "hide" }]])
+
+    install(dest, "--placement=sidebar")
+    assert.deepEqual(tui(dest).plugin, [["./plugins/kiconnect-status-tui.tsx", { placement: "sidebar", narrow: "hide" }]])
+
+    // A flag left off leaves its option untouched.
+    install(dest)
+    assert.deepEqual(tui(dest).plugin, [["./plugins/kiconnect-status-tui.tsx", { placement: "sidebar", narrow: "hide" }]])
+  })
+})
+
+test("install.sh rejects a placement it does not know", () => {
+  withDest("placement-bad", (dest) => {
+    assert.throws(() => install(dest, "--placement", "floating"), /status 2|Command failed/)
+    assert.throws(() => tui(dest), /ENOENT/)
+  })
+})

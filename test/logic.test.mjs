@@ -4,12 +4,14 @@ import test from "node:test"
 import {
   activeProviderID,
   DEFAULT_NARROW,
+  DEFAULT_PLACEMENT,
   displayWidth,
   formatSeconds,
   isActive,
   meaningfulStatus,
   mergeStatus,
   normaliseNarrow,
+  normalisePlacement,
   renderKiStatus,
   restoreStatus,
   selectTier,
@@ -247,6 +249,32 @@ test("draws only while KI:connect is the provider that answered last", () => {
   // An in-flight turn has not answered yet, so it does not hand over.
   assert.equal(isActive([ki, { role: "assistant", providerID: "saia", time: { created: 20_000 } }]), true)
   assert.equal(isActive([ki, saia], "saia"), true)
+})
+
+test("honours a forced placement in either direction", () => {
+  // "prompt": never the sidebar, however wide the terminal.
+  assert.equal(usesSidebar(200, {}, "prompt"), false)
+  assert.equal(usesSidebar(40, {}, "prompt"), false)
+
+  // "sidebar": always the sidebar, taken literally. The host force-hides it in
+  // a subagent session and below 121 columns, and this mode shows nothing
+  // there rather than falling back to the row it was told to leave alone.
+  assert.equal(usesSidebar(40, {}, "sidebar"), true)
+  assert.equal(usesSidebar(200, { parentID: "ses_parent" }, "sidebar"), true)
+
+  // Anything unrecognised is "auto", not a third behaviour.
+  assert.equal(usesSidebar(200, {}, "nonsense"), true)
+  assert.equal(usesSidebar(40, {}, "nonsense"), false)
+})
+
+test("normalises a placement, falling back rather than trusting input", () => {
+  assert.equal(DEFAULT_PLACEMENT, "auto")
+  for (const mode of ["auto", "prompt", "sidebar"]) assert.equal(normalisePlacement(mode), mode)
+  assert.equal(normalisePlacement(undefined), "auto")
+  assert.equal(normalisePlacement("floating"), "auto")
+  // A bad value from tui.json falls through to the layer beneath it.
+  assert.equal(normalisePlacement(undefined, "prompt"), "prompt")
+  assert.equal(normalisePlacement("floating", "sidebar"), "sidebar")
 })
 
 test("gives the sidebar the display exactly when the host would show it", () => {

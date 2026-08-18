@@ -88,9 +88,37 @@ The header carries the gateway's name, so the model line drops the `KI: ` prefix
 the one-line tiers need — and with no verified model that line is simply absent,
 rather than repeating the alias we asked the gateway to route to.
 
-**Known limitation:** a plugin cannot observe the manual sidebar toggle. With
-the sidebar toggled off on a wide terminal the block is rendered into it and is
-not visible; toggling it back restores it.
+That rule is the `auto` default. Placement is configurable:
+
+| `placement` | Where it draws |
+|---|---|
+| `auto` (default) | the table above — sidebar when the host shows one, prompt row otherwise |
+| `prompt` | always under the chat box, even on a wide terminal |
+| `sidebar` | only in the sidebar |
+
+`sidebar` is taken literally: the host force-hides the sidebar in subagent
+sessions and below 121 columns unless it is toggled open, and in those cases
+this mode shows nothing rather than quietly falling back to the row you asked it
+to leave alone. `prompt` never touches the sidebar.
+
+```sh
+./install.sh --placement prompt --narrow hide
+```
+
+```jsonc
+// ~/.config/opencode/tui.json
+"plugin": [["./plugins/kiconnect-status-tui.tsx", { "placement": "prompt", "narrow": "hide" }]]
+```
+
+`/ki-status-placement` cycles it at runtime (`auto` → `prompt` → `sidebar`),
+persists through `api.kv` and redraws immediately. Setting one option never
+drops the other: `install.sh` merges into whatever is already configured, and a
+flag left off leaves its option untouched.
+
+**Known limitation:** under `auto`, a plugin cannot observe the manual sidebar
+toggle. With the sidebar toggled off on a wide terminal the block is rendered
+into it and is not visible; toggling it back restores it. `placement: "prompt"`
+sidesteps that entirely.
 
 ## Narrow terminals
 
