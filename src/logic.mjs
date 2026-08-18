@@ -278,8 +278,14 @@ export function usesSidebar(width, session) {
   return total > 120 && !session?.parentID
 }
 
-export function resolveWidth(rendererWidth, columns, fallback = 120) {
-  for (const candidate of [rendererWidth, columns]) {
+/**
+ * The terminal width to budget against. The caller passes the *reactive*
+ * measurement (`useTerminalDimensions`), not `api.renderer.width` — the latter
+ * is a plain object property, so a widget reading it never re-runs on resize
+ * and never moves between slots.
+ */
+export function resolveWidth(measuredWidth, columns, fallback = 120) {
+  for (const candidate of [measuredWidth, columns]) {
     const width = Number(candidate)
     if (Number.isFinite(width) && width > 0) return Math.floor(width)
   }

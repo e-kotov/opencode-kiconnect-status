@@ -18,6 +18,7 @@
 // sidebar when the host would show it, and in the prompt row otherwise. See
 // `usesSidebar` for the rule and its one known limitation.
 
+import { useTerminalDimensions } from "@opentui/solid"
 import { For, Show } from "solid-js"
 import type { TuiPluginApi, TuiPluginModule, TuiSlotProps } from "@opencode-ai/plugin/tui"
 import { isActive, renderKiStatus, resolveWidth, restoreStatus, sidebarLines, tokensPerSecond, usesSidebar } from "./logic.mjs"
@@ -27,16 +28,23 @@ type KiconnectStatusProps = Pick<TuiSlotProps<"session_prompt_right">, "session_
 const plugin: TuiPluginModule = {
   id: "kiconnect-status-tui",
   tui: async (api: TuiPluginApi) => {
-    const terminalWidth = () =>
-      resolveWidth((api.renderer as { width?: unknown } | undefined)?.width, process.stdout?.columns)
-
-    // Which slot owns the display for this session, at this width.
-    const sidebarOwns = (session_id: string) => {
+    // `api.renderer` is a plain CliRenderer, so reading `.width` off it is not
+    // reactive and the widget would keep whatever width it saw at first render
+    // — it would never move between slots on a resize. `useTerminalDimensions`
+    // is the signal the host itself uses for this rule, so both agree.
+    // It is a hook: it must be called inside a component, not out here.
+    function useWidth() {
+      let dimensions: (() => { width: number }) | undefined
       try {
-        return usesSidebar(terminalWidth(), api.state.session.get(session_id))
+        dimensions = useTerminalDimensions()
       } catch {
-        return false
+        // `useRenderer` throws without a renderer context. Fall back to a
+        // non-reactive reading rather than taking the row down with us: the
+        // widget then still draws, it just will not move on a resize.
+        dimensions = undefined
       }
+      const fallback = () => (api.renderer as { width?: unknown } | undefined)?.width
+      return () => resolveWidth(dimensions ? dimensions().width : fallback(), process.stdout?.columns)
     }
 
     // The status to draw, or undefined when this widget must stay silent.
@@ -49,13 +57,14 @@ const plugin: TuiPluginModule = {
     }
 
     function KiconnectStatusPrompt(props: KiconnectStatusProps) {
+      const width = useWidth()
       const text = () => {
         try {
-          if (sidebarOwns(props.session_id)) return ""
+          if (usesSidebar(width(), api.state.session.get(props.session_id))) return ""
           const current = active(props.session_id)
           if (!current) return ""
           return renderKiStatus(current.status, {
-            width: terminalWidth(),
+            width: width(),
             tokensPerSecond: current.tokensPerSecond,
           })
         } catch {
@@ -76,9 +85,10 @@ const plugin: TuiPluginModule = {
     }
 
     function KiconnectStatusSidebar(props: KiconnectStatusProps) {
+      const width = useWidth()
       const lines = () => {
         try {
-          if (!sidebarOwns(props.session_id)) return []
+          if (!usesSidebar(width(), api.state.session.get(props.session_id))) return []
           const current = active(props.session_id)
           if (!current) return []
           return sidebarLines(current.status, { tokensPerSecond: current.tokensPerSecond }) as string[]
