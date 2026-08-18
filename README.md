@@ -88,6 +88,29 @@ chain safely: each holds its own `Symbol.for()` guard against double-wrapping
 and calls the `originalFetch` it captured. `saia-limits-server.js` only ever
 touches the `saia` provider. Nothing renders twice.
 
+### The metadata write is the sharp edge
+
+`PATCH /session` **replaces** the whole metadata object — measured against a
+live server, not assumed. Every writer therefore has to read, merge, and write
+back, and two writers handling the same response will drop each other's keys.
+
+This plugin loads before `upstream-model-server`, so it ends up wrapping *that*
+wrapper, which means its response handler runs last and its write lands last.
+An unguarded version of this file deleted `upstreamModel` on every single
+KI:connect session — three out of three, until it was fixed.
+
+Two measures keep both keys:
+
+- **The write is deferred** by 400 ms, so the sibling's prompt read-modify-write
+  has already landed by the time this one reads. The delay also coalesces the
+  several responses of a multi-step turn into one write.
+- **The write is verified**: after the PATCH it re-reads, and if `kiStatus` did
+  not survive it retries against the fresh metadata, up to three attempts. That
+  converges whichever writer wins the race.
+
+`flush` cancels any pending deferral and forces the write out, so a headless
+`opencode run` still records the status before the process exits.
+
 The quota reset interval is captured into `kiStatus.resetSeconds` and formatted
 by `formatSeconds`, but is not rendered: the strip has room for one line.
 

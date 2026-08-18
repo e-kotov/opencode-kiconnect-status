@@ -10,6 +10,18 @@
 // `kiStatus` and adds the quota. Both wrap `fetch`, and they chain safely
 // because each calls the `originalFetch` it captured; each also carries its own
 // `Symbol.for()` guard, so neither double-wraps.
+//
+// Writing the metadata is the part that needs care. `PATCH /session` *replaces*
+// the whole metadata object — measured, not assumed — so every writer has to
+// read, merge, and write back, and two writers racing on the same response will
+// drop each other's keys. This one wraps the other, so its response handler runs
+// last and its unguarded write reliably clobbered `upstreamModel`.
+//
+// Two things prevent that here. The write is deferred briefly, so the sibling's
+// prompt read-modify-write has finished before this one reads; and it is then
+// verified, re-reading after the PATCH and retrying against the fresh metadata
+// if the key did not survive. The deferral also coalesces the several responses
+// of a multi-step turn into one write.
 
 import { meaningfulStatus, mergeStatus, statusFromHeaders, statusKey } from "./logic.mjs"
 
@@ -56,28 +68,62 @@ function headerBag(headers) {
   return bag
 }
 
-async function saveStatus(client, sessionID, status) {
+/** Milliseconds to wait before reading, so a sibling writer has settled. */
+const WRITE_DELAY_MS = 400
+/** Milliseconds to wait before re-reading to confirm the write survived. */
+const VERIFY_DELAY_MS = 250
+const MAX_ATTEMPTS = 3
+
+const sleep = (ms) => (ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve())
+
+function transportOf(client) {
   const transport = client?._client
   if (!transport || typeof transport.get !== "function" || typeof transport.patch !== "function") {
     throw new Error("OpenCode's HTTP client is unavailable")
   }
-
-  const current = unwrap(await transport.get({ url: "/session/{sessionID}", path: { sessionID } }))
-  const metadata =
-    current?.metadata && typeof current.metadata === "object" && !Array.isArray(current.metadata)
-      ? current.metadata
-      : {}
-
-  await transport.patch({
-    url: "/session/{sessionID}",
-    path: { sessionID },
-    headers: { "Content-Type": "application/json" },
-    body: { metadata: { ...metadata, [METADATA_KEY]: status } },
-  })
+  return transport
 }
 
-export function createKiconnectStatusHooks(client, { onWarning = console.warn } = {}) {
+async function readMetadata(transport, sessionID) {
+  // OpenCode supports session metadata, but its generated SDK wrapper omits the
+  // field; use the configured transport directly so its directory and
+  // authentication context are retained.
+  const current = unwrap(await transport.get({ url: "/session/{sessionID}", path: { sessionID } }))
+  return current?.metadata && typeof current.metadata === "object" && !Array.isArray(current.metadata)
+    ? current.metadata
+    : {}
+}
+
+async function saveStatus(client, sessionID, status, { verifyDelayMs = VERIFY_DELAY_MS } = {}) {
+  const transport = transportOf(client)
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    const metadata = await readMetadata(transport, sessionID)
+    // Already there — either this write or a later one won; nothing to do.
+    if (statusKey(metadata[METADATA_KEY]) === statusKey(status)) return
+
+    await transport.patch({
+      url: "/session/{sessionID}",
+      path: { sessionID },
+      headers: { "Content-Type": "application/json" },
+      body: { metadata: { ...metadata, [METADATA_KEY]: status } },
+    })
+
+    if (attempt === MAX_ATTEMPTS) return
+    await sleep(verifyDelayMs)
+    const after = await readMetadata(transport, sessionID)
+    // Survived the window: done. Clobbered: go round again, this time merging
+    // onto whatever the other writer left behind.
+    if (statusKey(after[METADATA_KEY]) === statusKey(status)) return
+  }
+}
+
+export function createKiconnectStatusHooks(
+  client,
+  { onWarning = console.warn, writeDelayMs = WRITE_DELAY_MS, verifyDelayMs = VERIFY_DELAY_MS } = {},
+) {
   const pendingWrites = new Map()
+  const pendingTimers = new Map()
   // Merged per session, so a response that omits one field keeps the last known
   // value rather than blanking it.
   const sessions = new Map()
@@ -92,12 +138,29 @@ export function createKiconnectStatusHooks(client, { onWarning = console.warn } 
     if (!meaningfulStatus(next)) return
     // This fires on every response; only write when something actually changed.
     if (previous && statusKey(previous) === statusKey(next)) return
-    enqueueSave(sessionID, next)
+    scheduleSave(sessionID)
   }
 
-  function enqueueSave(sessionID, status) {
+  function scheduleSave(sessionID) {
+    if (pendingTimers.has(sessionID)) return
+    const timer = setTimeout(() => {
+      pendingTimers.delete(sessionID)
+      enqueueSave(sessionID)
+    }, writeDelayMs)
+    // Never hold the process open for a status widget; `flush` forces the write
+    // out on shutdown.
+    timer?.unref?.()
+    pendingTimers.set(sessionID, timer)
+  }
+
+  function enqueueSave(sessionID) {
+    const status = sessions.get(sessionID)
+    if (!meaningfulStatus(status)) return
+
     const previous = pendingWrites.get(sessionID) ?? Promise.resolve()
-    const current = previous.catch(() => {}).then(() => saveStatus(client, sessionID, status))
+    const current = previous
+      .catch(() => {})
+      .then(() => saveStatus(client, sessionID, sessions.get(sessionID) ?? status, { verifyDelayMs }))
     pendingWrites.set(sessionID, current)
     void current.then(
       () => {
@@ -113,6 +176,12 @@ export function createKiconnectStatusHooks(client, { onWarning = console.warn } 
   }
 
   async function flush() {
+    // Deferred writes must still happen when the process is going away.
+    for (const [sessionID, timer] of pendingTimers) {
+      clearTimeout(timer)
+      pendingTimers.delete(sessionID)
+      enqueueSave(sessionID)
+    }
     while (pendingWrites.size > 0) await Promise.allSettled([...pendingWrites.values()])
   }
 
