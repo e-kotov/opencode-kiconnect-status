@@ -1,7 +1,8 @@
 # opencode-kiconnect-status
 
-An OpenCode widget for the prompt row: the model that the KI:connect gateway
-says *actually* answered, and the hourly quota left on it.
+An OpenCode widget: the model that the KI:connect gateway says *actually*
+answered, and the hourly quota left on it. Drawn in the sidebar where there is
+room for it, and in the prompt row where there is not.
 
 ```
 KI: gpt-5.6-terra-mitarbeitende · 87/100/h · 82 T/s
@@ -15,7 +16,7 @@ equivalent.
 | File | Installed as | Job |
 |---|---|---|
 | `src/kiconnect-status-server.js` | `plugins/` | wraps the provider `fetch`, parses the response headers, writes `metadata.kiStatus` on the session |
-| `src/kiconnect-status-tui.tsx` | `plugins/` | reads that metadata and renders one line |
+| `src/kiconnect-status-tui.tsx` | `plugins/` | reads that metadata and renders it |
 | `src/logic.mjs` | `lib/` | all parsing, trust rules, and formatting; pure, no I/O |
 
 A server half is unavoidable: the evidence lives only in response headers, which
@@ -55,6 +56,42 @@ one response omits, so a verified model does not disappear on the next turn.
 Generation speed is computed in the TUI from message timings, not from a
 server-side timer, so it cannot bleed between sessions.
 
+## When it draws at all
+
+Only while KI:connect is the provider that answered last — the `providerID` of
+the newest completed assistant message. A session that has moved to SAIA must
+not keep showing KI:connect's model and quota. `metadata.kiStatus` is left
+untouched, so switching back restores the display without a new request. An
+in-flight turn has not answered yet, so it does not hand the display over.
+
+## Where it draws
+
+Two slots are registered and exactly one of them draws, following the host's own
+rule (`packages/tui/src/routes/session/index.tsx`) rather than a second guess at
+it:
+
+| Condition | Slot | Rendering |
+|---|---|---|
+| width > 120 and no `parentID` | `sidebar_content` | a block of lines, 36-column budget |
+| otherwise | `session_prompt_right` | one line, tiered to a tight budget |
+
+The sidebar is 42 columns and auto-shows above 120; it is force-hidden in
+subagent sessions. In the sidebar the block reads:
+
+```
+KI:connect
+gpt-5-mini-Mitarbeitende
+974/1000/h · 82 T/s
+```
+
+The header carries the gateway's name, so the model line drops the `KI: ` prefix
+the one-line tiers need — and with no verified model that line is simply absent,
+rather than repeating the alias we asked the gateway to route to.
+
+**Known limitation:** a plugin cannot observe the manual sidebar toggle. With
+the sidebar toggled off on a wide terminal the block is rendered into it and is
+not visible; toggling it back restores it.
+
 ## Narrow terminals
 
 `session_prompt_right` is one strip shared with the other prompt widgets. Four
@@ -73,12 +110,21 @@ first one wins, so `GPT5-Mitarbeitende` shortens to `GPT5` rather than to
 `Mitarbeitende`.
 
 Width comes from `api.renderer.width`, then `process.stdout.columns`, then 120;
-the budget is what is left after 12 columns for the prompt, divided between two
-widgets. As a backstop the widget renders inside
+the budget is what is left after `PROMPT_RESERVE = 72` columns for the prompt,
+divided between two widgets. That reserve is measured, not assumed: the left of
+the row carries agent, model, provider and reasoning effort —
+
+```
+Build auto · GPT5-mini-Mitarbeitende KI:connect (Responses API) · high
+```
+
+— about 70 columns of a 110-column terminal. At 110 each widget gets 19, which
+is exactly what T0 was built for. As a backstop the widget renders inside
 `<box flexShrink={1} overflow="hidden">` with `truncate`, so a mis-measured
 width clips instead of reflowing. If nothing fits, it renders nothing.
 
-Registered at `order: 130`, last in the strip.
+Registered at `order: 130`, last in the strip. The same order governs the
+sidebar stack.
 
 ## Coexisting with the other plugins
 

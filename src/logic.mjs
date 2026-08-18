@@ -178,6 +178,33 @@ export function renderKiStatus(status, options = {}) {
   return selectTier(tiers(status, options), budget)
 }
 
+/**
+ * The sidebar rendering: a block of lines, or none.
+ *
+ * The header carries the gateway's name, so the model line drops the `KI: `
+ * prefix the one-line tiers need. Each line steps down its own ladder to fit
+ * the fixed width.
+ */
+export function sidebarLines(status, options = {}) {
+  if (!meaningfulStatus(status)) return []
+  const budget = options.budget ?? SIDEBAR_BUDGET
+  const fit = (...candidates) => selectTier(candidates, budget)
+
+  const quota =
+    status.remaining !== undefined || status.limit !== undefined
+      ? `${status.remaining ?? "?"}/${status.limit ?? "?"}/h`
+      : undefined
+  const speed = Number(options.tokensPerSecond) > 0 ? `${Math.round(options.tokensPerSecond)} T/s` : undefined
+
+  return [
+    "KI:connect",
+    // Rule 1 again: with no verified model this line is simply absent, rather
+    // than repeating the alias we asked the gateway to route to.
+    status.actualModel ? fit(status.actualModel, shortenModel(status.actualModel)) : "",
+    fit(joinSegments([quota, speed]), quota ?? "", speed ?? ""),
+  ].filter((line) => line.length > 0)
+}
+
 /* -- Shared width handling; the same rules as opencode-cache-hit. ----------- */
 
 // Ranges rendered two columns wide by terminals.
@@ -203,13 +230,52 @@ export function displayWidth(text) {
   return width
 }
 
-/** Columns kept for the prompt itself before the right-hand strip is divided. */
-export const PROMPT_RESERVE = 12
+/**
+ * Columns the prompt row spends before the right-hand strip is divided.
+ *
+ * Measured, not assumed. The left side of the row carries agent, model,
+ * provider and reasoning effort, e.g.
+ *
+ *     Build auto · GPT5-mini-Mitarbeitende KI:connect (Responses API) · high
+ *
+ * which is ~70 columns of a 110-column terminal. The previous value of 12
+ * described none of that: it handed each widget half the terminal, and the
+ * left side wrapped into an unreadable block.
+ */
+export const PROMPT_RESERVE = 72
 
 export function widgetBudget(totalWidth, widgets = 2) {
   const total = Number(totalWidth)
   if (!Number.isFinite(total) || total <= 0) return 0
   return Math.max(0, Math.floor((Math.floor(total) - PROMPT_RESERVE) / Math.max(1, widgets)))
+}
+
+/**
+ * Columns a sidebar row may use.
+ *
+ * `packages/tui/src/routes/session/sidebar.tsx`: the sidebar box is `width={42}`
+ * with `paddingLeft={2} paddingRight={2}`, and the content box inside it adds
+ * `paddingRight={1}` — 37 columns. One more is held back for the scrollbar the
+ * `scrollbox` draws once the sidebar overflows. Rows carry `truncate` anyway,
+ * so an over-estimate clips a character rather than wrapping the block.
+ */
+export const SIDEBAR_BUDGET = 36
+
+/**
+ * Which slot owns the display, mirroring the host's own rule rather than
+ * guessing at it (`packages/tui/src/routes/session/index.tsx`): the sidebar is
+ * force-hidden in subagent sessions, and otherwise auto-shows above 120
+ * columns. Each slot renders nothing when the other owns the display, so the
+ * widget never appears twice.
+ *
+ * Known limitation: a plugin cannot observe the manual sidebar toggle. With the
+ * sidebar toggled off on a wide terminal the block is rendered into it and is
+ * not visible; toggling it back restores it.
+ */
+export function usesSidebar(width, session) {
+  const total = Number(width)
+  if (!Number.isFinite(total)) return false
+  return total > 120 && !session?.parentID
 }
 
 export function resolveWidth(rendererWidth, columns, fallback = 120) {
@@ -234,11 +300,41 @@ function finiteNumber(value) {
   return value
 }
 
+/** The provider id this widget speaks for. */
+export const PROVIDER_ID = "kiconnect"
+
+/**
+ * The provider that actually answered last: the `providerID` of the newest
+ * *completed* assistant message. `AssistantMessage.providerID` is part of the
+ * SDK's message shape, so gating on it needs no new plumbing.
+ */
+export function activeProviderID(messages) {
+  const list = Array.isArray(messages) ? messages : []
+  for (let index = list.length - 1; index >= 0; index -= 1) {
+    const message = list[index]
+    if (message?.role !== "assistant") continue
+    if (finiteNumber(message.time?.completed) === undefined) continue
+    return message.providerID
+  }
+  return undefined
+}
+
+/**
+ * Whether this widget should draw at all.
+ *
+ * A session that has moved to SAIA must not keep showing KI:connect's model and
+ * quota. The stored `metadata.kiStatus` is left untouched, so switching back
+ * restores the display without a new request.
+ */
+export function isActive(messages, providerID = PROVIDER_ID) {
+  return activeProviderID(messages) === providerID
+}
+
 /**
  * Tokens per second of the last completed assistant turn for this provider.
  * Derived from the message's own `time` field, so it is inherently per session.
  */
-export function tokensPerSecond(messages, providerID = "kiconnect") {
+export function tokensPerSecond(messages, providerID = PROVIDER_ID) {
   const list = Array.isArray(messages) ? messages : []
   for (let index = list.length - 1; index >= 0; index -= 1) {
     const message = list[index]
