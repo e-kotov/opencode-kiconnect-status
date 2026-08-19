@@ -14,23 +14,34 @@ const GATEWAY_HEADERS = {
   "x-gateway-upstream-model-source": "response.model",
 }
 
-/**
- * A session store with the semantics measured against a live OpenCode server:
- * `PATCH /session` replaces the whole metadata object rather than merging it.
- */
-function fakeClient({ initial = { saiaLimits: { hour: "5" } }, onPatch } = {}) {
+function fakeClient({ initial = { saiaLimits: { hour: "5" } }, sessions, onPatch } = {}) {
   const patches = []
+  const sessionMap = sessions ?? new Map([["ses_1", { id: "ses_1", metadata: { ...initial } }]])
   const state = { metadata: { ...initial } }
   return {
     patches,
     state,
+    sessionMap,
     client: {
       _client: {
-        get: async () => ({ data: { metadata: { ...state.metadata } } }),
+        get: async (args) => {
+          const sid = args?.path?.sessionID ?? "ses_1"
+          const sess = sessionMap.get(sid)
+          if (sess) {
+            if (!sessions && sid === "ses_1") sess.metadata = { ...state.metadata }
+            return { data: sess }
+          }
+          return { data: { id: sid, metadata: { ...state.metadata } } }
+        },
         patch: async (args) => {
           patches.push(args)
+          const sid = args?.path?.sessionID ?? "ses_1"
+          const sess = sessionMap.get(sid) ?? { id: sid, metadata: {} }
+          sess.metadata = { ...args.body.metadata }
+          sessionMap.set(sid, sess)
           state.metadata = { ...args.body.metadata }
           await onPatch?.(state, patches.length)
+          if (!sessions && sid === "ses_1") sess.metadata = { ...state.metadata }
         },
       },
     },
@@ -88,6 +99,25 @@ test("publishes model and quota to session metadata, preserving other keys", asy
   assert.equal(metadata.kiStatus.actualModel, "gpt-5.6-terra-mitarbeitende")
   assert.equal(metadata.kiStatus.remaining, 87)
   assert.equal(metadata.kiStatus.limit, 100)
+})
+
+test("persists kiStatus to both subagent and parent session", async () => {
+  const sessions = new Map([
+    ["ses_parent", { id: "ses_parent", metadata: {} }],
+    ["ses_child", { id: "ses_child", parentID: "ses_parent", metadata: {} }],
+  ])
+  const { client, sessionMap } = fakeClient({ sessions })
+  const hooks = createKiconnectStatusHooks(client, NO_DELAYS)
+  const { config } = fakeConfig()
+
+  hooks.config(config)
+  await call(config.provider.kiconnect.options, { sessionID: "ses_child" })
+  await hooks.flush()
+
+  assert.equal(sessionMap.get("ses_child").metadata.kiStatus.remaining, 87)
+  assert.ok(sessionMap.get("ses_child").metadata.kiStatus.subagent)
+  assert.equal(sessionMap.get("ses_parent").metadata.kiStatus.remaining, 87)
+  assert.ok(sessionMap.get("ses_parent").metadata.kiStatus.subagent)
 })
 
 test("strips the routing header before the request leaves the client", async () => {

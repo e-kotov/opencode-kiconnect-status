@@ -21,7 +21,22 @@
 import { useTerminalDimensions } from "@opentui/solid"
 import { createSignal, For, Show } from "solid-js"
 import type { TuiPluginApi, TuiPluginModule, TuiSlotProps } from "@opencode-ai/plugin/tui"
-import { isActive, normaliseNarrow, normalisePlacement, renderKiStatus, resolveWidth, restoreStatus, sidebarLines, tokensPerSecond, usesSidebar } from "./logic.mjs"
+import {
+  formatSubagentLines,
+  getActiveSubagents,
+  isMainSessionUsingKiconnect,
+  isSessionUsingKiconnect,
+  normaliseNarrow,
+  normalisePlacement,
+  renderKiStatus,
+  resolveKiStatus,
+  resolveSubagentKiStatus,
+  resolveWidth,
+  sidebarLines,
+  tokensPerSecond,
+  usesPrompt,
+  usesSidebar,
+} from "./logic.mjs"
 
 type KiconnectStatusProps = Pick<TuiSlotProps<"session_prompt_right">, "session_id">
 
@@ -81,9 +96,9 @@ const plugin: TuiPluginModule = {
             namespace: "palette",
             slashName: "ki-status-placement",
             run() {
-              // Three modes, so a cycle rather than a toggle, running from the
+              // Four modes, so a cycle rather than a toggle, running from the
               // least opinionated to the most.
-              const order = ["auto", "prompt", "sidebar"]
+              const order = ["both", "auto", "prompt", "sidebar"]
               const next = order[(order.indexOf(placement()) + 1) % order.length]
               setPlacement(next)
               remember(PLACEMENT_KEY, next)
@@ -117,10 +132,18 @@ const plugin: TuiPluginModule = {
 
     // The status to draw, or undefined when this widget must stay silent.
     const active = (session_id: string) => {
-      const messages = api.state.session.messages(session_id)
-      if (!isActive(messages)) return undefined
-      const status = restoreStatus(api.state.session.get(session_id)?.metadata?.kiStatus)
+      if (
+        !isSessionUsingKiconnect(
+          session_id,
+          (id) => api.state.session.get(id),
+          (id) => api.state.session.messages(id),
+        )
+      ) {
+        return undefined
+      }
+      const status = resolveKiStatus(session_id, (id) => api.state.session.get(id))
       if (!status) return undefined
+      const messages = api.state.session.messages(session_id)
       return { status, tokensPerSecond: tokensPerSecond(messages) }
     }
 
@@ -128,13 +151,23 @@ const plugin: TuiPluginModule = {
       const width = useWidth()
       const text = () => {
         try {
-          if (usesSidebar(width(), api.state.session.get(props.session_id), placement())) return ""
-          const current = active(props.session_id)
-          if (!current) return ""
-          return renderKiStatus(current.status, {
+          if (!usesPrompt(width(), api.state.session.get(props.session_id), placement())) return ""
+          if (
+            !isMainSessionUsingKiconnect(
+              props.session_id,
+              (id) => api.state.session.get(id),
+              (id) => api.state.session.messages(id),
+            )
+          ) {
+            return ""
+          }
+          const status = resolveKiStatus(props.session_id, (id) => api.state.session.get(id))
+          if (!status) return ""
+          const messages = api.state.session.messages(props.session_id)
+          return renderKiStatus(status, {
             width: width(),
             narrow: narrow(),
-            tokensPerSecond: current.tokensPerSecond,
+            tokensPerSecond: tokensPerSecond(messages),
           })
         } catch {
           // A widget must never take the prompt row down with it.
@@ -158,9 +191,19 @@ const plugin: TuiPluginModule = {
       const lines = () => {
         try {
           if (!usesSidebar(width(), api.state.session.get(props.session_id), placement())) return []
-          const current = active(props.session_id)
-          if (!current) return []
-          return sidebarLines(current.status, { tokensPerSecond: current.tokensPerSecond }) as string[]
+          if (
+            !isMainSessionUsingKiconnect(
+              props.session_id,
+              (id) => api.state.session.get(id),
+              (id) => api.state.session.messages(id),
+            )
+          ) {
+            return []
+          }
+          const status = resolveKiStatus(props.session_id, (id) => api.state.session.get(id))
+          if (!status) return []
+          const messages = api.state.session.messages(props.session_id)
+          return sidebarLines({ ...status, subagent: false }, { tokensPerSecond: tokensPerSecond(messages) }) as string[]
         } catch {
           return []
         }
@@ -186,16 +229,111 @@ const plugin: TuiPluginModule = {
       )
     }
 
+    function KiconnectSubagentSidebar(props: KiconnectStatusProps) {
+      const width = useWidth()
+      const data = () => {
+        try {
+          if (!usesSidebar(width(), api.state.session.get(props.session_id), placement())) return undefined
+          const status = resolveSubagentKiStatus(props.session_id, (id) => api.state.session.get(id))
+          if (!status) return undefined
+
+          const session = api.state.session.get(props.session_id)
+          let activeList = getActiveSubagents(
+            session?.metadata?.kiSubagents,
+            (id) => api.state.session.status(id),
+            (id) => api.state.session.get(id),
+          )
+
+          if (activeList.length === 0 && status.subagent) {
+            const subName =
+              typeof status.subagent === "string" && status.subagent !== "true" ? status.subagent : ""
+            if (subName) {
+              activeList = [
+                { id: props.session_id, name: subName, model: status.actualModel || status.model || "" },
+              ]
+            }
+          }
+
+          if (activeList.length === 0) return undefined
+
+          const quota =
+            status.remaining !== undefined
+              ? `${status.remaining}/h`
+              : status.limit !== undefined
+                ? `${status.limit}/h`
+                : undefined
+
+          if (!quota) return undefined
+
+          const saiaSub =
+            session?.metadata?.saiaSubagents && Object.keys(session.metadata.saiaSubagents).length > 0
+              ? getActiveSubagents(
+                  session.metadata.saiaSubagents,
+                  (id) => api.state.session.status(id),
+                  (id) => api.state.session.get(id),
+                ).length > 0
+              : Boolean(session?.metadata?.saiaSubagentLimits)
+
+          const subagentRows = formatSubagentLines(activeList, 5)
+
+          return {
+            showSectionHeader: !saiaSub,
+            title: "KI:connect",
+            quota,
+            subagentRows,
+          }
+        } catch {
+          return undefined
+        }
+      }
+
+      return (
+        <Show when={data()}>
+          {(d) => (
+            <box flexDirection="column" flexShrink={0}>
+              <Show when={d().showSectionHeader}>
+                <text height={1} wrapMode="none" truncate fg={api.theme.current.text}>
+                  <b>Subagents</b>
+                </text>
+              </Show>
+              <text height={1} wrapMode="none" truncate fg={api.theme.current.text}>
+                <b>{d().title}</b>
+              </text>
+              <text height={1} wrapMode="none" truncate fg={api.theme.current.textMuted}>
+                {d().quota}
+              </text>
+              <For each={d().subagentRows}>
+                {(row) => (
+                  <text height={1} wrapMode="none" truncate fg={api.theme.current.textMuted}>
+                    {row}
+                  </text>
+                )}
+              </For>
+            </box>
+          )}
+        </Show>
+      )
+    }
+
     api.slots.register({
-      // Last in the strip: after saia-limits (100) and cache-hit (120). The
-      // same order governs the sidebar stack.
-      order: 130,
+      // Main chat model KI:connect usage (order: 105, alongside SAIA at 100).
+      order: 105,
       slots: {
         session_prompt_right(_context, props) {
           return <KiconnectStatusPrompt session_id={props.session_id} />
         },
         sidebar_content(_context, props) {
           return <KiconnectStatusSidebar session_id={props.session_id} />
+        },
+      },
+    })
+
+    api.slots.register({
+      // Subagents section (order: 145, alongside SAIA subagents at 140).
+      order: 145,
+      slots: {
+        sidebar_content(_context, props) {
+          return <KiconnectSubagentSidebar session_id={props.session_id} />
         },
       },
     })

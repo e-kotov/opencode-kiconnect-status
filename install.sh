@@ -33,9 +33,9 @@ usage: install.sh [--dest DIR] [--narrow MODE]
   --narrow MODE  What the widget does when the prompt row is too narrow for
                  even its shortest form: "always" (print it anyway, the
                  default) or "hide".
-  --placement M  Where it draws: "auto" (sidebar when the host shows one,
-                 prompt row otherwise -- the default), "prompt" (always under
-                 the chat box) or "sidebar" (only in the sidebar).
+  --placement M  Where it draws: "both" (sidebar and prompt row -- the default),
+                 "auto" (sidebar when the host shows one, prompt row otherwise),
+                 "prompt" (always under the chat box) or "sidebar" (only in the sidebar).
 
 Both are written into tui.json as the plugin's options, and both can be changed
 afterwards from the command palette without reinstalling.
@@ -64,8 +64,8 @@ case "$NARROW" in
 esac
 
 case "$PLACEMENT" in
-  ""|auto|prompt|sidebar) ;;
-  *) printf 'install.sh: --placement must be "auto", "prompt" or "sidebar", got: %s\n' "$PLACEMENT" >&2; exit 2 ;;
+  ""|both|auto|prompt|sidebar) ;;
+  *) printf 'install.sh: --placement must be "both", "auto", "prompt" or "sidebar", got: %s\n' "$PLACEMENT" >&2; exit 2 ;;
 esac
 
 LIB_NAME="kiconnect-status-logic.mjs"

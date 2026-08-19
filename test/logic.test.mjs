@@ -8,11 +8,14 @@ import {
   displayWidth,
   formatSeconds,
   isActive,
+  isSessionUsingKiconnect,
   meaningfulStatus,
   mergeStatus,
   normaliseNarrow,
   normalisePlacement,
   renderKiStatus,
+  resolveKiStatus,
+  resolveWidth,
   restoreStatus,
   selectTier,
   shortenModel,
@@ -21,6 +24,7 @@ import {
   statusKey,
   tiers,
   tokensPerSecond,
+  usesPrompt,
   usesSidebar,
   widgetBudget,
 } from "../src/logic.mjs"
@@ -121,12 +125,10 @@ test("statusKey ignores the observation timestamp", () => {
 test("renders every tier", () => {
   const status = statusFromHeaders(GATEWAY_HEADERS, 0)
   assert.deepEqual(tiers(status, { tokensPerSecond: 82 }), [
-    "KI: gpt-5.6-terra-mitarbeitende · 87/100/h · 82 T/s",
-    "KI: gpt-5.6-terra-mitarbeitende · 87/100/h",
-    "KI: terra · 87/100/h",
-    "87/100/h",
-    // Five columns of the only thing that still matters when there is no room:
-    // requests left this hour.
+    "KI: gpt-5.6-terra-mitarbeitende · 87/h · 82 T/s",
+    "KI: gpt-5.6-terra-mitarbeitende · 87/h",
+    "KI: terra · 87/h",
+    "87/h · 82 T/s",
     "87/h",
   ])
 })
@@ -140,10 +142,10 @@ test("never falls back to the configured alias for the model name", () => {
     "x-ratelimit-remaining-hour": "87",
   }, 0)
   assert.deepEqual(tiers(status), [
-    "KI:connect · 87/100/h",
-    "KI:connect · 87/100/h",
-    "KI:connect · 87/100/h",
-    "87/100/h",
+    "KI:connect · 87/h",
+    "KI:connect · 87/h",
+    "KI:connect · 87/h",
+    "87/h",
     "87/h",
   ])
   assert.doesNotMatch(tiers(status).join(" "), /Mitarbeitende/i)
@@ -160,18 +162,18 @@ test("shows a missing half of the quota pair as a question mark", () => {
     "x-gateway-ratelimit-source": "local-shared",
     "x-ratelimit-remaining-hour": "87",
   }, 0)
-  assert.equal(tiers(status)[3], "87/?/h")
+  assert.equal(tiers(status)[3], "87/h")
   assert.equal(tiers(status)[4], "87/h", "the narrowest tier needs no limit at all")
 })
 
 test("steps down a tier as the terminal narrows", () => {
   const status = statusFromHeaders(GATEWAY_HEADERS, 0)
   const at = (width) => renderKiStatus(status, { width, tokensPerSecond: 82 })
-  assert.equal(at(200), "KI: gpt-5.6-terra-mitarbeitende · 87/100/h · 82 T/s")
-  assert.equal(at(160), "KI: gpt-5.6-terra-mitarbeitende · 87/100/h")
-  assert.equal(at(120), "KI: terra · 87/100/h")
-  assert.equal(at(110), "87/100/h")
-  assert.equal(at(90), "87/100/h", "9 columns still fits the bare quota")
+  assert.equal(at(200), "KI: gpt-5.6-terra-mitarbeitende · 87/h · 82 T/s")
+  assert.equal(at(160), "KI: gpt-5.6-terra-mitarbeitende · 87/h")
+  assert.equal(at(120), "KI: terra · 87/h")
+  assert.equal(at(110), "KI: terra · 87/h")
+  assert.equal(at(90), "87/h")
   assert.equal(at(84), "87/h", "6 columns still fits the hourly remainder")
   assert.equal(at(80), "87/h", "and so does 4, exactly")
   // Past the last tier the two narrow modes part company.
@@ -249,43 +251,109 @@ test("draws only while KI:connect is the provider that answered last", () => {
   // An in-flight turn has not answered yet, so it does not hand over.
   assert.equal(isActive([ki, { role: "assistant", providerID: "saia", time: { created: 20_000 } }]), true)
   assert.equal(isActive([ki, saia], "saia"), true)
+  assert.equal(isActive([], "kiconnect", { model: { providerID: "kiconnect" } }), true)
+  assert.equal(isActive([], "kiconnect", { model: { providerID: "saia" } }), false)
 })
 
-test("honours a forced placement in either direction", () => {
-  // "prompt": never the sidebar, however wide the terminal.
+test("resolves kiStatus walking up parent sessions if needed", () => {
+  const status = { actualModel: "gpt-5.6-terra-mitarbeitende", remaining: 87, limit: 100 }
+  const sessions = new Map([
+    ["root", { id: "root", metadata: { kiStatus: status } }],
+    ["sub_with_status", { id: "sub_with_status", parentID: "root", metadata: { kiStatus: { ...status, remaining: 50 } } }],
+    ["sub_empty", { id: "sub_empty", parentID: "root", metadata: {} }],
+    ["nested_sub", { id: "nested_sub", parentID: "sub_empty" }],
+  ])
+  const getSession = (id) => sessions.get(id)
+
+  assert.deepEqual(resolveKiStatus("root", getSession), restoreStatus(status))
+  assert.deepEqual(resolveKiStatus("sub_with_status", getSession), restoreStatus({ ...status, remaining: 50 }))
+  assert.deepEqual(resolveKiStatus("sub_empty", getSession), restoreStatus(status))
+  assert.deepEqual(resolveKiStatus("nested_sub", getSession), restoreStatus(status))
+  assert.equal(resolveKiStatus("unknown", getSession), undefined)
+})
+
+test("identifies when subagent or parent sessions run KI:connect", () => {
+  const ki = { role: "assistant", providerID: "kiconnect", time: { created: 0, completed: 1_000 } }
+  const saia = { role: "assistant", providerID: "saia", time: { created: 0, completed: 1_000 } }
+
+  const sessions = new Map([
+    ["parent_ki", { id: "parent_ki", model: { providerID: "kiconnect" } }],
+    ["parent_other", { id: "parent_other", model: { providerID: "saia" } }],
+    ["sub_ki", { id: "sub_ki", parentID: "parent_other", model: { providerID: "kiconnect" } }],
+    ["sub_other", { id: "sub_other", parentID: "parent_ki", model: { providerID: "saia" } }],
+    ["sub_inherit", { id: "sub_inherit", parentID: "parent_ki" }],
+  ])
+  const messages = new Map([
+    ["parent_ki", [ki]],
+    ["parent_other", [saia]],
+    ["sub_ki", []],
+    ["sub_other", []],
+    ["sub_inherit", []],
+  ])
+  const getSession = (id) => sessions.get(id)
+  const getMessages = (id) => messages.get(id) ?? []
+
+  assert.equal(isSessionUsingKiconnect("parent_ki", getSession, getMessages), true)
+  assert.equal(isSessionUsingKiconnect("parent_other", getSession, getMessages), false)
+  assert.equal(isSessionUsingKiconnect("sub_ki", getSession, getMessages), true, "subagent running KI:connect shows widget")
+  assert.equal(isSessionUsingKiconnect("sub_other", getSession, getMessages), false, "subagent running non-KI:connect does not show widget")
+  assert.equal(isSessionUsingKiconnect("sub_inherit", getSession, getMessages), true, "subagent inheriting from KI:connect parent shows widget")
+})
+
+test("honours a forced placement in either direction or both", () => {
+  // "prompt": never the sidebar, always the prompt
   assert.equal(usesSidebar(200, {}, "prompt"), false)
   assert.equal(usesSidebar(40, {}, "prompt"), false)
+  assert.equal(usesPrompt(200, {}, "prompt"), true)
+  assert.equal(usesPrompt(40, {}, "prompt"), true)
 
-  // "sidebar": always the sidebar, taken literally. The host force-hides it in
-  // a subagent session and below 121 columns, and this mode shows nothing
-  // there rather than falling back to the row it was told to leave alone.
+  // "sidebar": always the sidebar, never the prompt
   assert.equal(usesSidebar(40, {}, "sidebar"), true)
   assert.equal(usesSidebar(200, { parentID: "ses_parent" }, "sidebar"), true)
+  assert.equal(usesPrompt(200, {}, "sidebar"), false)
+  assert.equal(usesPrompt(40, {}, "sidebar"), false)
 
-  // Anything unrecognised is "auto", not a third behaviour.
+  // "both": draws in both sidebar and prompt (the default)
+  assert.equal(usesSidebar(200, {}, "both"), true)
+  assert.equal(usesSidebar(40, {}, "both"), true)
+  assert.equal(usesPrompt(200, {}, "both"), true)
+  assert.equal(usesPrompt(40, {}, "both"), true)
+
+  // default is "both"
+  assert.equal(usesSidebar(200, {}), true)
+  assert.equal(usesSidebar(40, {}), true)
+  assert.equal(usesPrompt(200, {}), true)
+  assert.equal(usesPrompt(40, {}), true)
+
+  // Anything unrecognised falls back to default ("both")
   assert.equal(usesSidebar(200, {}, "nonsense"), true)
-  assert.equal(usesSidebar(40, {}, "nonsense"), false)
+  assert.equal(usesSidebar(40, {}, "nonsense"), true)
+  assert.equal(usesPrompt(200, {}, "nonsense"), true)
+  assert.equal(usesPrompt(40, {}, "nonsense"), true)
 })
 
 test("normalises a placement, falling back rather than trusting input", () => {
-  assert.equal(DEFAULT_PLACEMENT, "auto")
-  for (const mode of ["auto", "prompt", "sidebar"]) assert.equal(normalisePlacement(mode), mode)
-  assert.equal(normalisePlacement(undefined), "auto")
-  assert.equal(normalisePlacement("floating"), "auto")
+  assert.equal(DEFAULT_PLACEMENT, "both")
+  for (const mode of ["both", "auto", "prompt", "sidebar"]) assert.equal(normalisePlacement(mode), mode)
+  assert.equal(normalisePlacement(undefined), "both")
+  assert.equal(normalisePlacement("floating"), "both")
   // A bad value from tui.json falls through to the layer beneath it.
   assert.equal(normalisePlacement(undefined, "prompt"), "prompt")
   assert.equal(normalisePlacement("floating", "sidebar"), "sidebar")
+  assert.equal(normalisePlacement(undefined, "auto"), "auto")
 })
 
-test("gives the sidebar the display exactly when the host would show it", () => {
-  // packages/tui/src/routes/session/index.tsx: 42-column sidebar, auto above
-  // 120 columns, force-hidden in a subagent session.
-  assert.equal(usesSidebar(121, {}), true)
-  assert.equal(usesSidebar(120, {}), false, "120 is not wider than 120")
-  assert.equal(usesSidebar(200, { parentID: "ses_parent" }), false, "a subagent session has no sidebar")
-  assert.equal(usesSidebar(200, undefined), true)
-  assert.equal(usesSidebar(undefined, {}), false)
-  assert.equal(usesSidebar("nonsense", {}), false)
+test("gives the sidebar the display under auto mode", () => {
+  // auto mode follows host rules: 42-column sidebar, auto above 120 cols,
+  // force-hidden in a subagent session.
+  assert.equal(usesSidebar(121, {}, "auto"), true)
+  assert.equal(usesSidebar(120, {}, "auto"), false, "120 is not wider than 120")
+  assert.equal(usesSidebar(200, { parentID: "ses_parent" }, "auto"), false, "a subagent session has no sidebar")
+  assert.equal(usesSidebar(200, undefined, "auto"), true)
+  assert.equal(usesSidebar(undefined, {}, "auto"), false)
+  assert.equal(usesPrompt(121, {}, "auto"), false)
+  assert.equal(usesPrompt(120, {}, "auto"), true)
+  assert.equal(usesPrompt(200, { parentID: "ses_parent" }, "auto"), true)
 })
 
 test("the sidebar renderer returns lines and the prompt renderer one string", () => {
@@ -298,7 +366,7 @@ test("the sidebar renderer returns lines and the prompt renderer one string", ()
   }, 0)
 
   const lines = sidebarLines(status, { tokensPerSecond: 82 })
-  assert.deepEqual(lines, ["KI:connect", "gpt-5-mini-Mitarbeitende", "974/1000/h · 82 T/s"])
+  assert.deepEqual(lines, ["KI:connect", "gpt-5-mini-Mitarbeitende", "974/h · 82 T/s"])
   for (const line of lines) {
     assert.ok(displayWidth(line) <= 36, `"${line}" must fit the sidebar's 36 columns`)
   }
@@ -311,9 +379,17 @@ test("the sidebar renderer returns lines and the prompt renderer one string", ()
     "x-ratelimit-limit-hour": "100",
     "x-ratelimit-remaining-hour": "87",
   }, 0)
-  assert.deepEqual(sidebarLines(unverified), ["KI:connect", "87/100/h"])
-  assert.deepEqual(sidebarLines(statusFromHeaders({}, 0)), [])
-  assert.deepEqual(sidebarLines(undefined), [])
+  // Subagent indicators
+  assert.deepEqual(sidebarLines({ ...status, subagent: true }, { tokensPerSecond: 82 }), [
+    "KI:connect (subagent)",
+    "gpt-5-mini-Mitarbeitende",
+    "974/h · 82 T/s",
+  ])
+  assert.deepEqual(sidebarLines({ ...status, subagent: "Scout" }, { tokensPerSecond: 82 }), [
+    "KI:connect (Scout)",
+    "gpt-5-mini-Mitarbeitende",
+    "974/h · 82 T/s",
+  ])
 })
 
 test("steps each sidebar line down its own ladder when the name is long", () => {
@@ -321,9 +397,9 @@ test("steps each sidebar line down its own ladder when the name is long", () => 
   assert.deepEqual(sidebarLines(status, { tokensPerSecond: 82 }), [
     "KI:connect",
     "gpt-5.6-terra-mitarbeitende",
-    "87/100/h · 82 T/s",
+    "87/h · 82 T/s",
   ])
-  assert.deepEqual(sidebarLines(status, { budget: 12, tokensPerSecond: 82 }), ["KI:connect", "terra", "87/100/h"])
+  assert.deepEqual(sidebarLines(status, { budget: 12, tokensPerSecond: 82 }), ["KI:connect", "terra", "87/h"])
 })
 
 test("computes speed from the last completed kiconnect turn", () => {

@@ -130,9 +130,12 @@ test("--placement writes the mode alongside any narrow option", () => {
     install(dest, "--placement=sidebar")
     assert.deepEqual(tui(dest).plugin, [["./plugins/kiconnect-status-tui.tsx", { placement: "sidebar", narrow: "hide" }]])
 
+    install(dest, "--placement=both")
+    assert.deepEqual(tui(dest).plugin, [["./plugins/kiconnect-status-tui.tsx", { placement: "both", narrow: "hide" }]])
+
     // A flag left off leaves its option untouched.
     install(dest)
-    assert.deepEqual(tui(dest).plugin, [["./plugins/kiconnect-status-tui.tsx", { placement: "sidebar", narrow: "hide" }]])
+    assert.deepEqual(tui(dest).plugin, [["./plugins/kiconnect-status-tui.tsx", { placement: "both", narrow: "hide" }]])
   })
 })
 

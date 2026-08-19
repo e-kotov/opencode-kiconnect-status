@@ -94,27 +94,87 @@ async function readMetadata(transport, sessionID) {
     : {}
 }
 
+function subagentNameOf(session) {
+  if (!session?.parentID) return undefined
+  if (typeof session.agent === "string" && session.agent.trim()) {
+    return session.agent.trim()
+  }
+  if (typeof session.title === "string") {
+    const match = session.title.match(/@([\w-]+)\s+subagent/i)
+    if (match) return match[1]
+  }
+  return "subagent"
+}
+
 async function saveStatus(client, sessionID, status, { verifyDelayMs = VERIFY_DELAY_MS } = {}) {
   const transport = transportOf(client)
+
+  const session = unwrap(await transport.get({ url: "/session/{sessionID}", path: { sessionID } }))
+  const isSubagent = Boolean(session?.parentID)
+  const subagentName = subagentNameOf(session)
+  const subagent = isSubagent ? subagentName || true : false
+
+  const statusToSave = {
+    ...status,
+    subagent,
+  }
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     const metadata = await readMetadata(transport, sessionID)
     // Already there — either this write or a later one won; nothing to do.
-    if (statusKey(metadata[METADATA_KEY]) === statusKey(status)) return
+    if (statusKey(metadata[METADATA_KEY]) === statusKey(statusToSave)) break
 
     await transport.patch({
       url: "/session/{sessionID}",
       path: { sessionID },
       headers: { "Content-Type": "application/json" },
-      body: { metadata: { ...metadata, [METADATA_KEY]: status } },
+      body: { metadata: { ...metadata, [METADATA_KEY]: statusToSave } },
     })
 
-    if (attempt === MAX_ATTEMPTS) return
+    if (attempt === MAX_ATTEMPTS) break
     await sleep(verifyDelayMs)
     const after = await readMetadata(transport, sessionID)
     // Survived the window: done. Clobbered: go round again, this time merging
     // onto whatever the other writer left behind.
-    if (statusKey(after[METADATA_KEY]) === statusKey(status)) return
+    if (statusKey(after[METADATA_KEY]) === statusKey(statusToSave)) break
+  }
+
+  // If this is a subagent session, also persist status to parent session
+  if (isSubagent && session?.parentID) {
+    try {
+      const parentMetadata = await readMetadata(transport, session.parentID)
+      const prevSubagents =
+        parentMetadata.kiSubagents && typeof parentMetadata.kiSubagents === "object"
+          ? parentMetadata.kiSubagents
+          : {}
+
+      const subagentModel = session?.model?.modelID || statusToSave.model || ""
+      const updatedSubagents = {
+        ...prevSubagents,
+        [sessionID]: {
+          id: sessionID,
+          name: subagentName || "subagent",
+          model: subagentModel,
+          updated: Date.now(),
+        },
+      }
+
+      await transport.patch({
+        url: "/session/{sessionID}",
+        path: { sessionID: session.parentID },
+        headers: { "Content-Type": "application/json" },
+        body: {
+          metadata: {
+            ...parentMetadata,
+            kiSubagents: updatedSubagents,
+            kiSubagentStatus: statusToSave,
+            [METADATA_KEY]: statusToSave,
+          },
+        },
+      })
+    } catch {
+      // Non-fatal if parent update fails
+    }
   }
 }
 
